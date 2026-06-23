@@ -1,2 +1,4 @@
 # Masters-Thesis
-The coding and data for my thesis called:  "Does It Matter How You Define Extreme Heat?  A Comparison of Extreme Heat Definitions and Their Effects on Health  Outcomes in Lombardy, Italy"
+The coding and data for my thesis called:  "Does It Matter How You Define Extreme Heat?
+The Role of Population Weighting and Extreme Heat Definitions in
+Heat–Mortality Associations in Lombardy, Italy"
