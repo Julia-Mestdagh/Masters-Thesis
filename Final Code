@@ -1,0 +1,2154 @@
+# ------------------------------------------------------------------------------
+# Thesis Project on 2011-2019 Lombardy
+# ------------------------------------------------------------------------------
+
+# This code was originally modeled off the workshop at this link: https://github.com/paniblanca/WorkshopClimateHealth_KI_Oct2025/blob/main/Day%201/01_Workshop_Practical_Code.R
+
+
+# PART A: SPATIAL DATA PREPARATION AND INTERSECTION
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 0. PACKAGE LOADING AND SETUP
+# ------------------------------------------------------------------------------
+
+# Load required packages for spatial analysis and data manipulation
+library(terra)        # For raster and vector spatial data handling
+library(sf)           # For simple features (vector) spatial operations
+library(data.table)   # For fast data manipulation
+library(exactextractr) # For precise raster extraction from polygons
+library(lubridate)    # For date/time manipulation
+library(gnm)          # For generalized non-linear models
+library(dlnm)         # For distributed lag non-linear models
+library(ggplot2)      # For data visualization
+library(tidyr)        # For reshaping data between wide and long format
+library(patchwork)    # For combining multiple ggplot panels into one figure
+library(splines)      # For fitting natural splines in regression models
+
+
+
+# ------------------------------------------------------------------------------
+# 1. PROJECT SETUP AND FILE PATHS
+# ------------------------------------------------------------------------------
+
+# Set base folder path
+base_dir <- "C:/MyLocalFiles/Internship - Thesis"  
+
+
+# Get admin data from shp format to gpkg format - unhashtag this part out when needed
+# 
+# # Path to shapefile
+# admin_path <- file.path(base_dir,
+#                         "Limiti01012019",
+#                         "Limiti01012019",
+#                         "ProvCM01012019",
+#                         "ProvCM01012019_WGS84.shp")
+# 
+# # Read shapefile
+# admin_shp <- st_read(admin_path)
+# 
+# # Define output gpkg path
+# admin_gpkg <- file.path(base_dir, "ProvCM01012019.gpkg")
+# 
+# # Convert to GeoPackage
+# st_write(admin_shp,
+#          admin_gpkg,
+#          driver = "GPKG",
+#          delete_dsn = TRUE)
+
+#### Define file paths for input data
+pop_path <- file.path(base_dir, "ESTAT_Census_2021_V2.gpkg")       # Population grid data
+admin_path <- file.path(base_dir, "ProvCM01012019.gpkg")           # Administrative provinces
+out_ix_gpkg <- file.path(base_dir, "province_population.gpkg")     # Output intersection file 
+tas_nc_path <- file.path(base_dir, "Era5_Data", "era5_2011_01.nc") # Temperature data
+
+# VARIABLES EXPLAINED:
+# - pop_path: Contains population counts in grid cells 
+# - admin_path: Contains administrative province boundaries 
+# - tas_nc_path: NetCDF file with hourly temperature data 
+
+# ------------------------------------------------------------------------------
+# 2. LOAD SPATIAL DATA
+# ------------------------------------------------------------------------------
+
+# # Load population grid data as vector (polygon) format
+# popu <- terra::vect(pop_path)
+# cat("Population data loaded. Number of grid cells:", nrow(popu), "\n")
+# 
+# # Load administrative province boundaries
+# admin <- terra::vect(admin_path)
+# cat("Administrative data loaded. Number of provinces:", nrow(admin), "\n")
+# 
+# # Check the column names and first few rows of each dataset
+# print("Population data columns:")
+# print(names(popu))
+# print("Administrative data columns:")
+# print(names(admin))
+# 
+# ### Cut admin data, in order to have only the 12 providences of lombardy
+# head(admin)
+# 
+# #find the COD_REG number that corresponds to Lombardy by filtering for the providence of Milan (MI) in column SIGIA
+# as.data.frame(admin[admin$SIGLA == "MI", ]) #need to have it as.data.frame in order to drop spatial structure for display
+# 
+# # 3 corresponds to Lombardy in column COD_REG
+# 
+# #Filter the dataset to only Lombardy, by filtering COD_REG column to 3
+# admin <- admin[admin$COD_REG == 3, ]
+# 
+# #check
+# head(admin)
+# cat("Administrative data loaded. Number of provinces:", nrow(admin), "\n")
+# as.data.frame(print(admin))
+# 
+# ## Keep only necessary columns
+# admin <-  admin[, c("COD_PROV", "DEN_UTS", "SIGLA")]
+# 
+# #checking with plotting and printing
+# as.data.frame(print(admin))
+# plot(admin)
+# text(admin, "DEN_UTS", cex=0.7) #shows the states
+# 
+# ## Get the Population grid data that is currently over Europe to be just over Lombardy
+# #to do this, use the admin data which is just now for Lombardy and use it as a reference to crop the population grid to just Lombardy
+# 
+# # classes
+# print(class(popu))
+# print(class(admin))
+# 
+# # CRS
+# crs(popu)
+# crs(admin)
+# #CRS is the coordinate reference system, note that they are not the same, so there are two different coordinate systems
+# #So need to get them both in the same CRS
+# 
+# ext(popu)
+# ext(admin)
+# #these will need to be the same
+# 
+# #convert to same CRS by projecting
+# popu <- project(popu, crs(admin))
+# 
+# #now crop popu to be the same area as admin
+# popu <- crop(popu, admin, ext=FALSE)
+# plot(popu)
+# 
+# #check same
+# ext(popu)
+# ext(admin)
+# 
+# #### Population data
+# #Only keep the necessary columns for the population grid data
+# print("Population data columns:")
+# print(names(popu))
+# head(popu)
+# 
+# ## Keep only the grid Id and total population of the grid columns
+# popu <-  popu[, c("GRD_ID", "T")]
+# plot(popu) 
+# 
+# #check
+# head(popu)
+# 
+# ###saving popu and admin files
+# admin_rds <- file.path(base_dir, "admin_lombardy.rds")
+# popu_rds  <- file.path(base_dir, "popu_lombardy.rds")
+# 
+# # Save
+# saveRDS(admin, admin_rds)
+# saveRDS(popu,  popu_rds)
+# 
+# cat("Saved admin ->", admin_rds, "\n")
+# cat("Saved popu  ->", popu_rds, "\n")
+
+###Load the saved admin and popu files
+admin <- readRDS(file.path(base_dir, "admin_lombardy.rds"))
+popu  <- readRDS(file.path(base_dir, "popu_lombardy.rds"))
+
+cat("Loaded admin and popu from disk\n")
+
+
+# ------------------------------------------------------------------------------
+# 3. SPATIAL INTERSECTION AND AREA CALCULATIONS
+# ------------------------------------------------------------------------------
+
+# Spatial intersection creates new polygons where population grid cells
+# overlap with administrative provinces. So it calculates how much of
+# each population grid cell falls within each province.
+
+# # Perform spatial intersection between population grid and administrative boundaries
+# cat("Performing spatial intersection...\n")
+# ix <- terra::intersect(popu, admin)
+# cat("Intersection complete. Number of intersected polygons:", nrow(ix), "\n")
+# 
+# # Calculate area of each intersected polygon in square meters
+# ix$area <- terra::expanse(ix)
+# 
+# #check that popu and admin datasets are in meters
+# crs(admin)
+# crs(popu)
+# 
+# # Calculate area fraction in square kilometers
+# # This represents the area of each intersection polygon
+# ix$frac <- ix$area / 1e+06  # Convert from m² to km²
+# 
+# #check that it goes from around 0 to 1
+# range(ix$frac)
+# 
+# # Save the intersection results
+# writeVector(ix, out_ix_gpkg, filetype = "GPKG", overwrite = TRUE)
+# cat("Intersection data saved to:", out_ix_gpkg, "\n")
+
+##access the file
+ix <- terra::vect(out_ix_gpkg)
+
+# ------------------------------------------------------------------------------
+# 4. VISUALIZATION AND QUALITY CHECK
+# ------------------------------------------------------------------------------
+
+# # Create side-by-side plots to visualize the spatial intersection
+# par(mfrow = c(1,2))
+# 
+# # Plot 1: Original administrative provinces with population grid overlay
+# plot(admin, main = "Provinces with Population Grid",
+#      col = "lightblue", border = "blue", lwd = 2)
+# plot(popu, add = TRUE, border = "purple", lwd = 0.5) #this shows that some of the population grids are between two provinces
+# 
+# # Plot 2: Intersected polygons (result of spatial intersection)
+# plot(ix, main = "Intersected Polygons (Grid × Province)",
+#      col = topo.colors(10), border = "grey80", lwd = 0.3, values = ix$T)
+# max(ix$T) #use T as the column instead of POP as that is what this dataset has as the name for total population for that grid
+# min(ix$T)
+
+# Reset plotting parameters
+#par(mfrow = c(1,1))
+
+# # Load NetCDF 
+nc <- terra::rast(tas_nc_path)
+hours <- terra::time(nc)
+
+# Check
+range(hours) 
+diff(head(hours, 10)) 
+head(hours, 5) 
+
+# ==============================================================================
+# PART B: POPULATION-WEIGHTED TEMPERATURE CALCULATION
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 5. HELPER FUNCTIONS FOR POPULATION WEIGHTING
+# ------------------------------------------------------------------------------
+
+# FUNCTION 1: Calculate population-weighted averages
+# This function computes population-weighted temperature for each province
+weighted_population <- function(exposure, shap, hours) {
+  # Convert spatial data and exposure values to data.table format for fast processing
+  shap <- as.data.table(as.data.frame(shap))
+  exposure <- as.data.table(exposure)
+  
+  # Attach extracted temperature values to shapefile data
+  shap[, var := exposure[[1]]]
+  
+  # Remove polygons with missing temperature data (e.g., over water bodies)
+  cat('Removing NA values...\n')
+  shap <- shap[complete.cases(shap$var)]
+  exposure <- exposure[complete.cases(exposure[[1]])]
+  
+  # POPULATION WEIGHTING CALCULATION:
+  # Calculate population contribution of each intersection polygon
+  shap[, pop_inc := T * frac]  # Population × area fraction
+  
+  # Calculate weights (proportion of total province population)
+  shap[, weights := pop_inc / sum(pop_inc), by = COD_PROV]
+  
+  # Assign formatted date-time column names to exposure data
+  names(exposure) <- format(hours, "%Y-%m-%dT%H:%M:%SZ") 
+  
+  # Apply population weights to temperature values
+  cat('Calculating population-weighted temperature...\n')
+  exposure <- exposure * shap$weights
+  
+  # Add province identifier for grouping
+  exposure[, location := shap$COD_PROV] 
+  
+  # Aggregate weighted values by province (sum of weighted temperatures)
+  exposure <- exposure[, lapply(.SD, sum), by = location]
+  
+  # Reshape from wide to long format: one row per province-date combination
+  cat('Reshaping data to long format...\n')
+  exposure <- melt(exposure, id.vars = "location", 
+                   variable.name = "date", value.name = 'tas')
+  
+  # Sort by location for consistent output
+  exposure <- exposure[order(location)]
+  
+  cat('Population weighting complete!\n')
+  return(exposure)
+}                      
+# FUNCTION 2: Process NetCDF climate data and calculate province averages
+create_dte <- function(file, v) {
+  nc <- terra::rast(file)
+  cat("Loaded NetCDF with", terra::nlyr(nc), "time layers\n")
+  
+  hours <- terra::time(nc)
+  names(nc) <- format(hours, "%Y-%m-%dT%H:%M:%SZ")
+  
+  cat("Processing:", format(min(hours), "%Y-%m"), "\n")
+  
+  nc <- terra::project(nc, terra::crs(v))
+  e  <- exactextractr::exact_extract(nc, sf::st_as_sf(v), fun = "mean",
+                                     max_cells_in_memory = 1e+09)
+  
+  dte <- weighted_population(e, v, hours)
+  return(list(dte = dte, e = e))
+}
+
+# ------------------------------------------------------------------------------
+# 6. CALCULATE POPULATION-WEIGHTED TEMPERATURE BY PROVINCE
+# ------------------------------------------------------------------------------
+
+# Load the intersection data created in Part A
+province_pop <- st_read(out_ix_gpkg)
+cat("Loaded intersection data with", nrow(province_pop), "polygons\n")
+
+#reload saved data
+dte   <- fread(file.path(base_dir, "province_tas_full.csv"))
+dte_u <- fread(file.path(base_dir, "province_tas_unweighted_full.csv"))
+dte[,   date := as.POSIXct(date, tz = "UTC")]
+dte_u[, date := as.POSIXct(date, tz = "UTC")]
+cat("Reloaded saved data\n")
+
+# Geographic ordering: north → central → southern 
+province_order <- c(
+  "Varese", "Como", "Lecco", "Sondrio",   
+  "Milano", "Monza e della Brianza", "Bergamo", "Brescia",  
+  "Pavia", "Lodi", "Cremona", "Mantova"  
+)
+
+# Create province-name lookup
+province_names <- as.data.table(as.data.frame(admin))[
+  , .(
+    location = as.integer(COD_PROV),
+    province = DEN_UTS
+  )
+]
+
+# Make sure location type matches
+dte[,   location := as.integer(location)]
+dte_u[, location := as.integer(location)]
+
+# Add province names to temperature datasets
+dte   <- merge(dte,   province_names, by = "location", all.x = TRUE)
+dte_u <- merge(dte_u, province_names, by = "location", all.x = TRUE)
+
+# Check that merge worked
+print(dte[is.na(province), unique(location)])
+print(dte_u[is.na(province), unique(location)])
+
+# ##loop for pre-processing and population weighting (and not weighting)
+# 
+# # Find all monthly NetCDF files
+# nc_files <- sort(list.files(
+#   path       = file.path(base_dir, "Era5_Data"),
+#   pattern    = "^era5_\\d{4}_\\d{2}\\.nc$",
+#   full.names = TRUE
+# ))
+# cat("Found", length(nc_files), "monthly files\n")
+# 
+# # Output CSV paths
+# csv_out   <- file.path(base_dir, "province_tas_full.csv")
+# csv_out_u <- file.path(base_dir, "province_tas_unweighted_full.csv")
+
+# # Delete old files before starting the loop so start fresh
+# if (file.exists(csv_out))   file.remove(csv_out)
+# if (file.exists(csv_out_u)) file.remove(csv_out_u)
+# 
+# for (i in seq_along(nc_files)) {
+#   cat("\n--- File", i, "of", length(nc_files), ":", basename(nc_files[i]), "---\n")
+# 
+#   # Compute hours for this file (needed for unweighted section)
+#   nc_tmp <- terra::rast(nc_files[i])
+#   #secs   <- as.numeric(sub(".*=", "", names(nc_tmp)))
+#   #hours  <- as.POSIXct(secs, origin = "1970-01-01", tz = "UTC")
+#   hours  <- terra::time(nc_tmp)
+# 
+#   result    <- create_dte(nc_files[i], province_pop)
+#   dte_month <- result$dte
+#   e         <- result$e
+# 
+#   ###WEIGHTED
+#   dte_month[, tas  := tas - 273.15]
+#   dte_month[, date := as.POSIXct(as.character(date),
+#                                  format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")]
+#   fwrite(dte_month, csv_out, append = file.exists(csv_out))
+# 
+#   ### UNWEIGHTED
+#   shap <- as.data.table(as.data.frame(province_pop))
+#   e_dt <- as.data.table(e)
+# 
+#   keep <- complete.cases(e_dt[, 1])
+#   shap <- shap[keep]
+#   e_dt <- e_dt[keep]
+# 
+#   names(e_dt) <- format(hours, "%Y-%m-%dT%H:%M:%SZ")
+#   e_dt[, location := shap$COD_PROV]
+# 
+#   dte_u_month <- e_dt[, lapply(.SD, mean), by = location]
+#   dte_u_month <- melt(dte_u_month, id.vars = "location",
+#                       variable.name = "date", value.name = "tas_unweighted")
+# 
+#   dte_u_month[, tas_unweighted := tas_unweighted - 273.15]
+#   dte_u_month[, date := as.POSIXct(as.character(date),
+#                                    format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")]
+# 
+#   fwrite(dte_u_month, csv_out_u, append = file.exists(csv_out_u))
+#   cat("Month", i, "saved (weighted + unweighted)\n")
+# }
+
+# #Load both full time series
+# dte   <- fread(csv_out);   dte[,   date := as.POSIXct(date, tz = "UTC")]
+# dte_u <- fread(csv_out_u); dte_u[, date := as.POSIXct(date, tz = "UTC")]
+# cat("Full time series loaded\n")
+
+# Display summary of the processed data
+cat("Temperature data summary:\n")
+print(summary(dte$tas))
+cat("Number of provinces:", length(unique(dte$location)), "\n")
+
+class(dte$date)
+head(dte$date, 3)
+print(range(dte$date))
+
+
+###
+#Quality Checks
+####
+
+#checking expected row count
+n_expected <- length(unique(dte$date)) * length(unique(dte$location))
+cat("Rows:", nrow(dte), " Expected:", n_expected, "\n") #should be the days times hours times 12 (provinces)
+
+#check each province 
+chk <- dte[, .(n_hours = uniqueN(date),
+               min_date = min(date),
+               max_date = max(date),
+               n_na = sum(is.na(tas))),
+           by = location][order(location)]
+print(chk)
+
+#check with province has highest average temp and which lowest
+province_mean <- dte[, .(mean_temp = mean(tas)), by = location]
+province_mean
+as.data.frame(print(admin))
+#the province of Sondrio is the coldest for this time period, which make sense as in in mountains and most north, boarding Switzerland
+#while Lodi province is the warmest and is not in the mountains and farthest south, so checks out
+
+#Plot
+# Convert hourly timestamps to dates
+dte[, date_day := as.Date(date)]
+
+# Keep summer months only
+dte_summer <- dte[format(date_day, "%m") %in% c("06", "07", "08")]
+
+# Calculate daily maximum temperature per province
+daily_tmax_prov <- dte_summer[, .(
+  tas_daily_max = max(tas, na.rm = TRUE)
+), by = .(province, date_day)]
+
+# Median Tmax per province, used for colour scale
+province_medians <- daily_tmax_prov[, .(
+  median_tmax = median(tas_daily_max, na.rm = TRUE)
+), by = province]
+
+daily_tmax_prov <- merge(daily_tmax_prov, province_medians, by = "province")
+
+# Order provinces north to south
+daily_tmax_prov[, province := factor(province, levels = rev(province_order))]
+
+ggplot(daily_tmax_prov, aes(
+  x = tas_daily_max,
+  y = province,
+  fill = median_tmax
+)) +
+  geom_violin(trim = TRUE, alpha = 0.85, colour = "white", linewidth = 0.3) +
+  stat_summary(
+    aes(group = province),
+    fun = median,
+    geom = "point",
+    colour = "white",
+    size = 1.6
+  ) +
+  scale_fill_gradient(
+    low = "steelblue",
+    high = "hotpink1",
+    guide = "none"
+  ) +
+  labs(
+    title = "Distribution of Population-Weighted Summer Daily Maximum Temperature by Province",
+    subtitle = "Ordered north to south | White dot = median | Fill colour indicates cooler-to-warmer provinces",
+    x = "Summer Daily Maximum Temperature (°C)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, colour = "grey40", size = 9),
+    panel.grid.major.y = element_blank()
+  )
+
+# Province-level summary numbers
+summary_tmax <- daily_tmax_prov[, .(
+  median_tmax = median(tas_daily_max, na.rm = TRUE),
+  mean_tmax   = mean(tas_daily_max, na.rm = TRUE),
+  p25_tmax    = quantile(tas_daily_max, 0.25, na.rm = TRUE),
+  p75_tmax    = quantile(tas_daily_max, 0.75, na.rm = TRUE)
+), by = province][order(median_tmax)]
+
+summary_tmax
+
+lowest <- summary_tmax[1]
+highest <- summary_tmax[.N]
+
+lowest
+highest
+
+###check for duplicates - expect the same number in both
+nrow(dte)
+nrow(unique(dte))
+
+#-----------------------------------------------------------------------------
+#plots
+#-----------------------------------------------------------------------------
+
+# checks after the merge to make sure no duplicates caused by merge
+cat("Duplicates after merge:", nrow(dte) - nrow(unique(dte[, .(location, date)])), "\n")
+cat("Unique provinces in province_names:", uniqueN(province_names$location), "\n")
+
+
+# Plot of the average daily temperature cycle
+dte[, hour := as.integer(format(date, "%H"))]
+dte[, date_day := as.Date(date)]
+
+daily_hourly <- dte[, .(tas_mean = mean(tas)), by = .(date_day, hour)]
+
+hourly_summary <- daily_hourly[, .(
+  mean_tas = mean(tas_mean),
+  ci_lo    = mean(tas_mean) - 1.96 * sd(tas_mean) / sqrt(.N),
+  ci_hi    = mean(tas_mean) + 1.96 * sd(tas_mean) / sqrt(.N)
+), by = hour]
+
+diurnal_range <- round(max(hourly_summary$mean_tas) - min(hourly_summary$mean_tas), 1)
+
+ggplot(hourly_summary, aes(x = hour)) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), fill = "firebrick", alpha = 0.25) +
+  geom_line(aes(y = mean_tas), colour = "firebrick", linewidth = 0.9) +
+  scale_x_continuous(breaks = seq(0, 23, by = 3)) +
+  labs(
+    title    = "Average Daily Temperature Cycle",
+    subtitle = paste0("Line = hourly mean  |  Shaded band = 95% confidence interval  |  Average temperature change across the day: ", diurnal_range, "°C"),
+    x = "Hour of day",
+    y = "Temperature (°C)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Daily max
+dte_daily <- dte[, .(tas_max = max(tas)), by = .(location, province, date_day)]
+
+
+# Add season column
+dte_daily[, season := fifelse(
+  month(date_day) %in% c(6, 7, 8), "Summer", "Other"
+)]
+
+
+# Threshold: 90th percentile of summer daily max
+dte_daily[season == "Summer",
+          threshold_summer := quantile(tas_max, 0.90),
+          by = province]
+
+
+# Flag extreme summer days (in the max table)
+dte_daily[, extreme_heat := fcase(
+  season == "Summer", tas_max > threshold_summer,
+  default = FALSE
+)]
+
+# Build a one-row-per-province-per-season threshold table 
+# Extract threshold values for plot lines
+thresholds_summer <- dte_daily[
+  season == "Summer",
+  .(threshold = first(threshold_summer)),
+  by = province
+]
+
+
+# Apply province ordering
+dte_daily$province <- factor(dte_daily$province,     levels = province_order)
+thresholds_summer$province <- factor(thresholds_summer$province, levels = province_order)
+
+### Distribution plot - weighted 
+
+###time series plots of the weighted time series
+ggplot(dte_daily, aes(x = date_day, y = tas_max)) +
+  geom_line(linewidth = 0.3, colour = "grey40") +
+  facet_wrap(~ province, scales = "fixed") +
+  labs(title = "Population-Weighted Daily Tmax by Province",
+       x = 'Year',
+       y = "Daily Maximum Temperature (°C)") +
+  theme_minimal()
+
+
+# Extract both thresholds for plot lines
+thresholds_both <- dte_daily[
+  season == "Summer",
+  .(p90 = quantile(tas_max, 0.90),
+    p95 = quantile(tas_max, 0.95)),
+  by = province
+]
+
+thresholds_both_long <- melt(
+  thresholds_both,
+  id.vars = "province",
+  variable.name = "definition",
+  value.name = "threshold"
+)
+
+thresholds_both_long$province <- factor(thresholds_both_long$province, levels = province_order)
+
+# Distribution plot with both thresholds
+ggplot(dte_daily[season == "Summer"], aes(x = tas_max)) +
+  geom_histogram(bins = 40, fill = "tomato", alpha = 0.7) +
+  geom_vline(data = thresholds_both_long,
+             aes(xintercept = threshold, linetype = definition),
+             colour = "darkred", linewidth = 0.8) +
+  scale_linetype_manual(
+    values = c("p90" = "dashed", "p95" = "dotted"),
+    labels = c("p90" = "90th percentile", "p95" = "95th percentile"),
+    name = NULL
+  ) +
+  facet_wrap(~ province, scales = "free_y") +
+  labs(
+    title = "Distribution of Summer Daily Tmax per Province",
+    subtitle = "Dashed = 90th percentile threshold | Dotted = 95th percentile threshold",
+    x = "Daily Maximum Temperature (°C)",
+    y = "Days"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+
+
+#############
+# unweighted
+#############
+dte_u[, date_day := as.Date(date)]
+
+# Daily Max
+dte_u_daily <- dte_u[, .(tas_max = max(tas_unweighted)), by = .(location, province, date_day)]
+
+# Add season
+dte_u_daily[, season := fifelse(
+  month(date_day) %in% c(6, 7, 8), "Summer", "Other"
+)]
+
+
+# Summer threshold: 90th percentile of summer daily max
+dte_u_daily[season == "Summer",
+            threshold_summer := quantile(tas_max, 0.90),
+            by = province]
+
+
+# Flag extreme summer days (in the max table)
+dte_u_daily[, extreme_heat := fcase(
+  season == "Summer", tas_max > threshold_summer,
+  default = FALSE
+)]
+
+# Extract threshold values for plot lines
+thresholds_summer_unweighted <- dte_u_daily[
+  season == "Summer",
+  .(threshold = first(threshold_summer)),
+  by = province
+]
+
+
+# Apply province ordering
+dte_u_daily$province  <- factor(dte_u_daily$province, levels = province_order)
+thresholds_summer_unweighted$province <- factor(thresholds_summer_unweighted$province, levels = province_order)
+
+
+# Distribution plot for unweighted with daily Tmax with 90th percentile marked
+ggplot(dte_u_daily[season == "Summer"], aes(x = tas_max)) +
+  geom_histogram(bins = 40, fill = "tomato", alpha = 0.7) +
+  geom_vline(data = thresholds_summer_unweighted,
+             aes(xintercept = threshold),
+             linetype = "dashed", colour = "darkred", linewidth = 0.8) +
+  facet_wrap(~ province, scales = "free_y") +
+  labs(title = "Distribution of Summer Daily Tmax per Province - Unweighted",
+       subtitle = "Dashed line = 90th percentile threshold (extreme heat)",
+       x = "Daily Maximum Temperature (°C)", y = "Count") +
+  theme_minimal()
+
+
+# Merge the daily max datasets 
+compare_daily <- merge(
+  dte_daily[,   .(province, date_day, tas_max)],
+  dte_u_daily[, .(province, date_day, tas_max_u = tas_max)],
+  by = c("province", "date_day")
+)
+compare_daily[, diff := tas_max - tas_max_u]
+
+# Plot the differences in daily Tmax: weighted - unweighted
+ggplot(compare_daily, aes(date_day, diff)) +
+  geom_line(linewidth = 0.3) +
+  facet_wrap(~ province) +
+  labs(title = "Difference in Daily Maximum Temperature: Weighted vs Unweighted",
+       x = NULL, y = "Difference in Tmax (°C)") +
+  theme_minimal()
+
+
+# ------------------------------------------------------
+# 7. Heat Map of Weighted - Unweighted Differences
+# ------------------------------------------------------
+###The heat map will have three columns: mean difference weighted - unweighted temperature max, summer Tmax range in province, and Population gini coefficent (how uniform the population is within the province)
+
+# Mean weighted-unweighted difference per province
+# Load all NC files and compute per-cell summer Tmax for each year
+nc_files <- sort(list.files(
+  path       = file.path(base_dir, "Era5_Data"),
+  pattern    = "^era5_\\d{4}_\\d{2}\\.nc$",
+  full.names = TRUE
+))
+
+# Filter to summer months only (June=06, July=07, August=08)
+nc_files_summer <- nc_files[grepl("_(06|07|08)\\.nc$", nc_files)]
+
+# Extract year from filename
+years <- unique(sub(".*era5_(\\d{4})_.*", "\\1", nc_files_summer))
+
+# For each year, load the 3 summer months, stack, take cell-wise max
+summer_max_list <- lapply(years, function(yr) {
+  files_yr <- nc_files_summer[grepl(paste0("era5_", yr), nc_files_summer)]
+  r <- terra::rast(files_yr)          # stack all hours across 3 months
+  r <- r - 273.15                     # convert Kelvin to Celsius
+  r_max <- max(r)                    
+  names(r_max) <- yr
+  return(r_max)
+})
+
+# Stack all 9 yearly summer max rasters into one
+summer_max_stack <- terra::rast(summer_max_list)
+
+# Average summer Tmax across all 9 years
+summer_avg <- mean(summer_max_stack)
+
+# Project to match province_pop CRS
+summer_avg <- terra::project(summer_avg, terra::crs(terra::vect(out_ix_gpkg)))
+
+# Extract mean summer Tmax to each intersection polygon centroid
+ix_dt <- as.data.table(as.data.frame(ix))
+ix_dt[, summer_tmax := terra::extract(summer_avg, terra::centroids(ix))[[2]]]
+
+# Filter to populated cells only (population > 0)
+ix_pop <- ix_dt[T > 0]
+
+# Add province names
+ix_pop <- merge(ix_pop, province_names, by.x = "COD_PROV", by.y = "location")
+
+# Compute min and max summer Tmax per province (populated cells only)
+temp_gradient <- ix_pop[, .(
+  tmax_cold = round(min(summer_tmax), 1),
+  tmax_warm = round(max(summer_tmax), 1),
+  temp_range = round(max(summer_tmax) - min(summer_tmax), 1)
+), by = province]
+
+temp_gradient$province <- factor(temp_gradient$province, levels = province_order)
+temp_gradient <- temp_gradient[order(province)]
+
+print(temp_gradient)
+
+
+# homogeneity in population density 
+# Idea:
+# - quantify how evenly population is distributed across grid pieces inside each province.
+# - Gini = 0  -> very homogeneous / evenly spread population
+# - Gini = 1  -> very concentrated population
+
+# Gini coefficient function
+gini_fun <- function(x) {
+  x <- x[is.finite(x) & !is.na(x)]
+  x <- x[x >= 0]
+  
+  if (length(x) == 0) return(NA_real_)
+  if (sum(x) == 0) return(0)
+  
+  x <- sort(x)
+  n <- length(x)
+  G <- (2 * sum(x * seq_len(n)) / (n * sum(x))) - (n + 1) / n
+  return(G)
+}
+
+# Use the intersection object because it already contains the province pieces and area of each piece inside each province
+pop_homog_dt <- as.data.table(as.data.frame(ix))
+
+# Approximate population inside each intersected piece
+pop_homog_dt[, pop_piece := T * frac]
+
+# Add province names
+pop_homog_dt <- merge(
+  pop_homog_dt,
+  province_names,
+  by.x = "COD_PROV",
+  by.y = "location",
+  all.x = TRUE
+)
+
+# Province-level homogeneity / concentration metrics
+pop_homogeneity <- pop_homog_dt[, .(
+  n_pop_cells = .N,
+  pop_gini = round(gini_fun(pop_piece), 3),
+  pop_homogeneity = round(1 - gini_fun(pop_piece), 3),
+  pop_piece_min = round(min(pop_piece), 1),
+  pop_piece_max = round(max(pop_piece), 1)
+), by = province]
+
+pop_homogeneity$province <- factor(pop_homogeneity$province, levels = province_order)
+pop_homogeneity <- pop_homogeneity[order(province)]
+
+print(pop_homogeneity)
+
+# Average change across years (summer daily max, weighted - unweighted) 
+# first calculate annual province means, then summarise across years
+
+compare_daily[, year := year(date_day)]
+compare_daily[, season := fifelse(month(date_day) %in% c(6, 7, 8), "Summer", "Other")]
+
+annual_diff_summer <- compare_daily[season == "Summer",
+                                    .(
+                                      mean_diff_year = mean(diff),
+                                      abs_mean_diff_year = mean(abs(diff))
+                                    ),
+                                    by = .(province, year)
+]
+
+avg_diff_years <- annual_diff_summer[, .(
+  avg_diff_across_years = round(mean(mean_diff_year), 2),
+  avg_abs_diff_across_years = round(mean(abs_mean_diff_year), 2),
+  min_yearly_diff = round(min(mean_diff_year), 2),
+  max_yearly_diff = round(max(mean_diff_year), 2)
+), by = province]
+
+avg_diff_years$province <- factor(avg_diff_years$province, levels = province_order)
+avg_diff_years <- avg_diff_years[order(province)]
+
+print(avg_diff_years)
+
+
+# Format temperature gradient column for table
+temp_gradient_table <- copy(temp_gradient)
+
+temp_gradient_table[, temp_gradient_label := paste0(
+  tmax_cold, "°C - ", tmax_warm, "°C"
+)]
+
+temp_gradient_table <- temp_gradient_table[, .(
+  province,
+  temp_gradient_label,
+  temp_range
+)]
+
+temp_gradient_table$province <- factor(temp_gradient_table$province, levels = province_order)
+temp_gradient_table <- temp_gradient_table[order(province)]
+
+print(temp_gradient_table)
+
+#heatmap
+summary_table <- Reduce(function(x, y) merge(x, y, by = "province", all = TRUE), list(
+  avg_diff_years[, .(province, avg_change_degC = avg_diff_across_years)],
+  temp_gradient_table[, .(province, temp_gradient_label, temp_range)], 
+  pop_homogeneity[, .(province, population_gini = pop_gini)]
+))
+
+
+heat_dt <- summary_table[, .(
+  province,
+  avg_change_degC,
+  summer_Tmax_range_degC = temp_range,
+  population_gini,
+  temp_gradient_label  
+)]
+
+heat_long <- melt(
+  heat_dt[, .(province, avg_change_degC, summer_Tmax_range_degC, population_gini)],
+  id.vars = "province",
+  variable.name = "metric", value.name = "value"
+)
+
+# Normalise 0-1 within each metric for the colors in the heatmap
+heat_long[, value_scaled := (value - min(value)) /
+            (max(value) - min(value)),
+          by = metric]
+
+# Build display labels: use temp_gradient_label for the range column, raw values elsewhere
+heat_long[, display_label := as.character(round(value, 2))]
+
+# Merge in the gradient label for the range rows
+heat_long[metric == "summer_Tmax_range_degC",
+          display_label := heat_dt$temp_gradient_label[match(province, heat_dt$province)]]
+
+heat_long[, metric := factor(metric,
+                             levels = c("avg_change_degC", "summer_Tmax_range_degC", "population_gini"),
+                             labels = c("Avg ΔTmax\nSummer (°C)", "Summer Tmax\nRange (°C)", "Population\nGini")
+)]
+
+heat_long$province <- factor(heat_long$province, levels = rev(province_order))
+
+ggplot(heat_long, aes(x = metric, y = province, fill = value_scaled)) +
+  geom_tile(colour = "white", linewidth = 0.8) +
+  geom_text(aes(label = display_label), size = 3.2, colour = "black") +  
+  scale_fill_distiller(
+    palette   = "YlOrRd", direction = 1,
+    name      = "Relative\nMagnitude",
+    limits    = c(0, 1),
+    breaks    = c(0, 0.5, 1),
+    labels    = c("Low", "Mid", "High")
+  ) +
+  scale_x_discrete(position = "top") +
+  labs(
+    title    = "Population Weighting Impact by Province",
+    subtitle = "ΔTmax: weighted minus unweighted summer daily max | Tmax Range: min–max across populated cells\nGini: population concentration within province (0 = uniform, 1 = fully concentrated)",
+    x = NULL, y = NULL,
+    caption  = "9-year summer average (June–August)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(size = 8.5, colour = "grey40"),
+    axis.text.x   = element_text(face = "bold", size = 10),
+    axis.text.y   = element_text(size = 10),
+    panel.grid    = element_blank(),
+    legend.position = "right"
+  )
+
+# ------------------------------------------------------------------------------
+# 8. Visual on the 4 types of data - 4 panels
+# ------------------------------------------------------------------------------
+# Panel A — administrative boundaries
+p_admin <- ggplot(st_as_sf(admin)) +
+  geom_sf(fill = "lightblue", color = "blue", linewidth = 0.5) +
+  labs(title = "(A) Administrative boundaries",
+       subtitle = "12 Lombardy provinces, ISTAT 2019") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+
+# Panel B — ERA5 temperature raster (2015)
+# Project admin borders to match raster CRS for overlay
+admin_sf <- st_as_sf(admin)
+admin_proj <- st_transform(admin_sf, crs = st_crs(terra::crs(summer_max_stack)))
+
+# Convert raster stack to data frame for ggplot
+summer_df <- as.data.frame(summer_max_stack, xy = TRUE)
+
+# Reshape to long format: one row per cell per year
+summer_long <- tidyr::pivot_longer(summer_df, 
+                                   cols = -c(x, y), 
+                                   names_to = "year", 
+                                   values_to = "tmax")
+
+
+summer_one_year <- summer_long[summer_long$year == "2015", ]
+
+p_era5 <- ggplot() +
+  geom_raster(data = summer_one_year, aes(x = x, y = y, fill = tmax)) +
+  geom_sf(data = admin_proj, fill = NA, color = "white", linewidth = 0.5) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1, name = "Max temp (°C)") +
+  labs(title = "(B) ERA5-Land temperature",
+       subtitle = "Summer maximum temperature, 2015",
+       x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(axis.text  = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+
+# Panel C — population grid
+tmp <- as.data.table(as.data.frame(province_pop))
+
+# Rebuild weights
+tmp[, pop_inc := T * frac]
+tmp[, weights := pop_inc / sum(pop_inc), by = COD_PROV]
+tmp[, .(sum_w = sum(weights)), by = COD_PROV]
+province_pop_map <- province_pop
+province_pop_map$pop_inc <- tmp$pop_inc
+province_pop_map$weights <- tmp$weights
+
+p_pop <- ggplot(province_pop_map) +
+  geom_sf(aes(fill = log10(T + 1)), color = NA) +
+  geom_sf(data = st_as_sf(admin), fill = NA, color = "white", linewidth = 0.7) +
+  scale_fill_viridis_c(
+    name   = "Population\nper cell",
+    breaks = log10(c(1, 10, 100, 1000, 10000) + 1),
+    labels = c("0", "10", "100", "1k", "10k")
+  ) +
+  labs(title = "(C) Population grid",
+       subtitle = "Eurostat GEOSTAT 2021, 1 km² cells") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+
+# Panel D — mortality 
+# Load the mortality data
+mort_raw <- fread(
+  file = file.path(base_dir,
+                   "decessi-comunali-giornalieri-provvisori-4",
+                   "Dataset decessi comunali giornalieri e tracciato record_dati provvisori_4",
+                   "comuni_giornaliero_31dicembre25.csv"),
+  sep = ","
+)
+
+# Filter to Lombardy only (REG == 3) and keep only the columns needed
+mort_lomb <- mort_raw[REG == 3, .(
+  PROV,
+  NOME_PROVINCIA,
+  CL_ETA,
+  GE,
+  T_11, T_12, T_13, T_14, T_15, T_16, T_17, T_18, T_19
+)]
+
+# Reshape from wide to long: one row per municipality-agegroup-day-year
+mort_long <- melt(mort_lomb,
+                  id.vars      = c("PROV", "NOME_PROVINCIA", "CL_ETA", "GE"),
+                  measure.vars = paste0("T_", 11:19),
+                  variable.name = "year_col",
+                  value.name    = "deaths")
+
+# Extract numeric year
+mort_long[, year := as.integer(sub("T_", "", year_col)) + 2000]
+
+
+mort_long[, GE_pad   := sprintf("%04d", as.integer(GE))]
+mort_long[, month    := as.integer(substr(GE_pad, 1, 2))]
+mort_long[, day      := as.integer(substr(GE_pad, 3, 4))]
+mort_long[, date_day := suppressWarnings(make_date(year, month, day))]
+
+# Drop Feb 29 records in non-leap years 
+mort_long <- mort_long[!is.na(date_day)]
+
+# Verify
+cat("NA dates remaining:", sum(is.na(mort_long$date_day)), "\n")
+cat("Total rows after dropping invalid dates:", nrow(mort_long), "\n")
+
+
+# Keep only summer months (June, July, August)
+mort_summer <- mort_long[month %in% c(6, 7, 8)]
+
+# Sum across all age groups and municipalities within each province-day-year
+# This gives total deaths per province per day
+mort_province_daily <- mort_summer[, .(daily_deaths = sum(deaths)),
+                                   by = .(PROV, NOME_PROVINCIA, GE, year)]
+
+# Take the mean across all days and years
+# This gives mean daily deaths per province over summers 2011-2019
+mort_province <- mort_province_daily[, .(mean_daily_deaths = mean(daily_deaths)),
+                                     by = .(PROV, NOME_PROVINCIA)]
+
+# Print to check numbers look reasonable
+# Milano should be highest, as has largest population
+# Sondrio should be lowest, as has lowest population
+print(mort_province[order(-mean_daily_deaths)])
+
+# Join to admin shapefile
+mort_province_sf <- merge(admin_sf,
+                          mort_province,
+                          by.x = "COD_PROV",
+                          by.y = "PROV")
+
+# Check all 12 provinces matched
+cat("Provinces in mort_province_sf:", nrow(mort_province_sf), "\n")
+
+# Panel D
+p_mortality <- ggplot(mort_province_sf) +
+  geom_sf(aes(fill = mean_daily_deaths)) +
+  scale_fill_distiller(palette = "Reds", direction = 1,
+                       name = "Mean daily\ndeaths") +
+  labs(title = "(D) Mortality data",
+       subtitle = "Mean daily deaths per province, summers 2011–2019") +
+  theme_minimal() +
+  theme(axis.text  = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+
+
+# Combine with patchwork
+(p_admin | p_era5) / (p_pop | p_mortality)
+
+
+# ------------------------------------------------------------------------------
+# 11b. Calculate Historical P90 / P95 Thresholds from 2003–2010
+# ------------------------------------------------------------------------------
+
+# nc_files_hist <- sort(list.files(
+#   path       = file.path(base_dir, "Era5_Data"),
+#   pattern    = "^era5_(200[1-9]|2010)_(06|07|08)\\.nc$",
+#   full.names = TRUE
+# ))
+# cat("Found", length(nc_files_hist), "historical summer files (2001-2010)\n")
+
+# hist_list <- lapply(nc_files_hist, function(f) {
+#   result <- create_dte(f, province_pop)
+#   dt <- as.data.table(result$dte)
+#   dt[, date := as.POSIXct(as.character(date), format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")]
+#   dt
+# })
+
+#Save file
+#saveRDS(hist_list, file = file.path(base_dir, "hist_list_era5_2001_2010_summer.rds"))
+
+
+# # #unweighted
+# province_pop_proj <- sf::st_transform(sf::st_as_sf(province_pop),
+#                                       terra::crs(terra::rast(nc_files_hist[1])))
+# 
+# hist_list_u <- lapply(seq_along(nc_files_hist), function(i) {
+#   cat("\nProcessing file", i, "of", length(nc_files_hist), ":", basename(nc_files_hist[i]), "\n")
+#   f      <- nc_files_hist[i]
+#   nc_tmp <- terra::rast(f)
+#   hours  <- terra::time(nc_tmp)
+#   
+#   e <- exactextractr::exact_extract(nc_tmp, province_pop_proj,
+#                                     fun = "mean", max_cells_in_memory = 1e+09,
+#                                     progress = FALSE)
+#   
+#   e_dt <- as.data.table(e)
+#   shap <- as.data.table(as.data.frame(province_pop))
+#   keep <- complete.cases(e_dt[, 1])
+#   e_dt <- e_dt[keep]; shap <- shap[keep]
+#   
+#   names(e_dt) <- format(hours, "%Y-%m-%dT%H:%M:%SZ")
+#   e_dt[, location := shap$COD_PROV]
+#   
+#   dt <- melt(e_dt, id.vars = "location", variable.name = "date", value.name = "tas_unweighted")
+#   dt <- dt[, .(tas_unweighted = mean(tas_unweighted)), by = .(location, date)]
+#   dt[, tas_unweighted := tas_unweighted - 273.15]
+#   dt[, date := as.POSIXct(as.character(date), format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")]
+#   dt
+# })
+# 
+# saveRDS(hist_list_u, file.path(base_dir, "hist_list_unweighted_era5_2001_2010_summer.rds"))
+
+# Get saved files
+hist_list_u <- readRDS(file.path(base_dir, "hist_list_unweighted_era5_2001_2010_summer.rds"))
+hist_list <- readRDS(file.path(base_dir, "hist_list_era5_2001_2010_summer.rds"))
+
+dte_hist <- rbindlist(hist_list)
+dte_hist <- merge(dte_hist, province_names, by = "location")
+dte_hist[, date_day := as.Date(date)]
+
+dte_hist_daily <- dte_hist[, .(tas_max = max(tas)), by = .(location, province, date_day)]
+dte_hist_daily[, tas_max := tas_max - 273.15]
+dte_hist_daily <- dte_hist_daily[month(date_day) %in% c(6, 7, 8)]
+
+hist_thresholds <- dte_hist_daily[, .(
+  p90_hist = quantile(tas_max, 0.90),
+  p95_hist = quantile(tas_max, 0.95)
+), by = province]
+
+# Unweighted historical thresholds (for fully unweighted P90/P95 models)
+
+dte_hist_u <- rbindlist(hist_list_u)
+dte_hist_u <- merge(dte_hist_u, province_names, by = "location")
+dte_hist_u[, date_day := as.Date(date)]
+
+dte_hist_u_daily <- dte_hist_u[, .(tas_max = max(tas_unweighted)), by = .(location, province, date_day)]
+dte_hist_u_daily <- dte_hist_u_daily[month(date_day) %in% c(6, 7, 8)]
+
+hist_thresholds_u <- dte_hist_u_daily[, .(
+  p90_hist_u = quantile(tas_max, 0.90),
+  p95_hist_u = quantile(tas_max, 0.95)
+), by = province]
+
+cat("Historical thresholds (2001-2010):\n")
+print(hist_thresholds[order(province)])
+
+# ------------------------------------------------------------------------------
+# 9. Make a Plot of the Number of Extreme Heat Days by Province and Definition
+# ------------------------------------------------------------------------------
+
+extreme_dt <- copy(dte_daily)
+extreme_dt <- extreme_dt[month(date_day) %in% c(6, 7, 8)]
+
+# Merge in historical thresholds
+extreme_dt <- merge(extreme_dt, hist_thresholds, by = "province", all.x = TRUE)
+
+# Create four extreme heat definitions
+extreme_dt[, extreme_p90 := tas_max > p90_hist]
+extreme_dt[, extreme_p95 := tas_max > p95_hist]
+extreme_dt[, extreme_33  := tas_max > 33]
+extreme_dt[, extreme_35  := tas_max > 35]
+
+# Count extreme heat days per province under each definition
+extreme_counts <- extreme_dt[, .(
+  P90 = sum(extreme_p90),
+  P95 = sum(extreme_p95),
+  Above_33C = sum(extreme_33),
+  Above_35C = sum(extreme_35)
+), by = province]
+
+extreme_counts$province <- factor(extreme_counts$province, levels = province_order)
+extreme_counts <- extreme_counts[order(province)]
+print(extreme_counts)
+
+# Percent of summer days classified as extreme
+n_summer_days <- extreme_dt[, .(n_days = .N), by = province]
+
+extreme_percent <- merge(extreme_counts, n_summer_days, by = "province")
+extreme_percent[, `:=`(
+  P90_percent       = round(P90       / n_days * 100, 1),
+  P95_percent       = round(P95       / n_days * 100, 1),
+  Above_33C_percent = round(Above_33C / n_days * 100, 1),
+  Above_35C_percent = round(Above_35C / n_days * 100, 1)
+)]
+print(extreme_percent)
+
+# Extreme heat days per year and province
+extreme_dt[, year := year(date_day)]
+
+annual_extreme_counts <- extreme_dt[, .(
+  P90       = sum(extreme_p90),
+  P95       = sum(extreme_p95),
+  Above_33C = sum(extreme_33),
+  Above_35C = sum(extreme_35)
+), by = .(province, year)]
+print(annual_extreme_counts)
+
+# Reshape for plotting
+extreme_long <- melt(
+  extreme_counts,
+  id.vars      = "province",
+  variable.name = "definition",
+  value.name   = "extreme_days"
+)
+
+extreme_long[, definition := factor(
+  definition,
+  levels = c("P90", "P95", "Above_33C", "Above_35C"),
+  labels = c("P90", "P95", ">33°C", ">35°C")
+)]
+
+ggplot(extreme_long, aes(x = province, y = extreme_days, fill = definition)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Number of Extreme Heat Days by Province and Definition",
+    x     = NULL,
+    y     = "Number of summer extreme heat days",
+    fill  = "Definition"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(hjust = 0.5)
+  )
+
+# ------------------------------------------------------------------------------
+# 10. Make a Heat Map on the Overlap in Timing between the Different Definitions
+# ------------------------------------------------------------------------------
+
+extreme_flags <- extreme_dt[, .(
+  province,
+  date_day,
+  P90 = extreme_p90,
+  P95 = extreme_p95,
+  T33 = extreme_33,
+  T35 = extreme_35
+)]
+
+jaccard <- function(a, b) {
+  intersection <- sum(a & b)
+  union        <- sum(a | b)
+  intersection / union
+}
+
+timing_overlap <- extreme_flags[, .(
+  P90_vs_P95 = jaccard(P90, P95),
+  P90_vs_33  = jaccard(P90, T33),
+  P90_vs_35  = jaccard(P90, T35),
+  P95_vs_33  = jaccard(P95, T33),
+  P95_vs_35  = jaccard(P95, T35),
+  T33_vs_35  = jaccard(T33, T35)
+), by = province]
+print(timing_overlap)
+
+timing_long <- melt(
+  timing_overlap,
+  id.vars      = "province",
+  variable.name = "comparison",
+  value.name   = "jaccard"
+)
+
+ggplot(timing_long, aes(comparison, province, fill = jaccard)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = round(jaccard, 2), color = jaccard < 0.25),
+    size = 3
+  ) +
+  scale_color_manual(values = c("TRUE" = "white", "FALSE" = "black"), guide = "none") +
+  scale_fill_viridis_c(name = "Timing overlap") +
+  labs(
+    title = "Overlap in Extreme Heat Timing Between Definitions",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal()
+
+# ------------------------------------------------------------------------------
+# 11. Plot the Timings of Extreme Heat Days by Definition for the Summer of 2015 for Three Different Provinces
+# ------------------------------------------------------------------------------
+plot_year <- 2015
+
+plot_dt <- extreme_dt[
+  year(date_day) == plot_year &
+    month(date_day) %in% c(6, 7, 8) &
+    province %in% c("Sondrio", "Milano", "Mantova")
+]
+
+plot_dt <- plot_dt[, .(
+  province,
+  date_day,
+  P90 = extreme_p90,
+  P95 = extreme_p95,
+  `>33°C` = extreme_33,
+  `>35°C` = extreme_35
+)]
+
+plot_long <- melt(
+  plot_dt,
+  id.vars = c("province", "date_day"),
+  variable.name = "definition",
+  value.name = "extreme"
+)
+
+plot_long[, province := factor(
+  province,
+  levels = c("Sondrio", "Milano", "Mantova")
+)]
+
+plot_long[, definition := factor(
+  definition,
+  levels = c("P90", "P95", ">33°C", ">35°C")
+)]
+
+# Plot
+ggplot(plot_long, aes(x = date_day, y = definition, fill = extreme)) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  facet_wrap(~ province, ncol = 1) +
+  scale_fill_manual(
+    values = c("TRUE" = "firebrick", "FALSE" = "grey"),
+    labels = c("Not extreme", "Extreme"),
+    name = NULL
+  ) +
+  scale_x_date(
+    date_breaks = "2 weeks",
+    date_labels = "%d %b"
+  ) +
+  labs(
+    title = paste0("Timing of Extreme Heat Days by Definition, Summer ", plot_year),
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid = element_blank()
+  )
+
+# ==============================================================================
+# PART C: Weekly Heat-Mortality Poisson Models
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 12. Create Daily Extreme Heat Defintions
+# ------------------------------------------------------------------------------
+
+# Summer indicator
+dte_daily[, is_summer := season == "Summer"]
+
+# Merge historical thresholds into dte_daily
+dte_daily <- merge(dte_daily, hist_thresholds, by = "province", all.x = TRUE)
+
+# Four heat definitions using historical thresholds
+dte_daily[, heat_90 := is_summer & tas_max > p90_hist]
+dte_daily[, heat_95 := is_summer & tas_max > p95_hist]
+dte_daily[, heat_33 := is_summer & tas_max >= 33]
+dte_daily[, heat_35 := is_summer & tas_max >= 35]
+
+
+# ------------------------------------------------------------------------------
+# 13. Aggregate Daily Heat to Weekly
+# ------------------------------------------------------------------------------
+
+# Monday-start weeks
+dte_daily[, exposure_week_start := floor_date(date_day, unit = "week", week_start = 1)]
+
+heat_weekly <- dte_daily[
+  ,
+  .(
+    heat_days_90 = sum(heat_90),
+    heat_days_95 = sum(heat_95),
+    heat_days_33 = sum(heat_33),
+    heat_days_35 = sum(heat_35),
+    mean_tmax    = mean(tas_max),
+    max_tmax     = max(tas_max),
+    n_summer_days = sum(is_summer),
+    n_temp_days   = .N
+  ),
+  by = .(location, province, exposure_week_start)
+]
+
+# Keep exposure weeks that contain at least one summer day
+heat_weekly <- heat_weekly[n_summer_days > 0]
+
+# Outcome is deaths in the week after the heat exposure week
+heat_weekly[, outcome_week_start := exposure_week_start + days(7)]
+heat_weekly[, year := year(exposure_week_start)]
+heat_weekly[, week_of_year := isoweek(exposure_week_start)]
+
+
+# ------------------------------------------------------------------------------
+# 14. Prepare ISTAT Mortality Data 
+# The data was already loaded in section 8 
+# ------------------------------------------------------------------------------
+
+# Keep only thesis analysis years
+analysis_years <- 2011:2019
+mort_long <- mort_long[year %in% analysis_years]
+
+mort_long[, location := as.integer(PROV)]
+mort_long[, deaths   := as.numeric(deaths)]
+
+# Create date column 
+
+mort_long[, GE_pad   := sprintf("%04d", as.integer(GE))]
+mort_long[, month    := as.integer(substr(GE_pad, 1, 2))]
+mort_long[, day      := as.integer(substr(GE_pad, 3, 4))]
+mort_long[, date_day := suppressWarnings(make_date(year, month, day))]
+
+# Drop Feb 29 records in non-leap years 
+mort_long <- mort_long[!is.na(date_day)]
+
+# Verify
+cat("NA dates remaining:", sum(is.na(mort_long$date_day)), "\n")
+cat("Total rows after dropping invalid dates:", nrow(mort_long), "\n")
+
+# Aggregate to total daily deaths per province
+mort_daily <- mort_long[,
+                                .(deaths = sum(deaths)),
+                                by = .(location, date_day)
+]
+
+# Add province names
+mort_daily <- merge(mort_daily, province_names, by = "location", all.x = TRUE)
+
+
+# ------------------------------------------------------------------------------
+# 15. Fill Missing Dealth Days and Sum to Weekly Deaths
+# ------------------------------------------------------------------------------
+
+# The ISTAT dictionary says missing municipality-age-day rows mean zero deaths, so this needs to be filled in
+
+date_min <- min(heat_weekly$exposure_week_start)
+date_max <- max(heat_weekly$outcome_week_start) + days(6)
+
+all_dates <- seq(date_min, date_max, by = "day")
+
+province_date_grid <- CJ(
+  location = unique(province_names$location),
+  date_day = all_dates
+)
+
+province_date_grid <- merge(
+  province_date_grid,
+  province_names,
+  by = "location",
+  all.x = TRUE
+)
+
+mort_daily_full <- merge(
+  province_date_grid,
+  mort_daily[, .(location, date_day, deaths)],
+  by = c("location", "date_day"),
+  all.x = TRUE
+)
+
+mort_daily_full[, death_week_start := floor_date(date_day, unit = "week", week_start = 1)]
+
+mort_weekly <- mort_daily_full[
+  ,
+  .(
+    deaths_next_week = sum(deaths),
+    n_death_days = uniqueN(date_day)
+  ),
+  by = .(location, province, death_week_start)
+]
+
+# ------------------------------------------------------------------------------
+# 16. Link Heat Exposure Weeks to the Following Week's Deaths
+# ------------------------------------------------------------------------------
+
+heat_weekly <- heat_weekly[year %in% analysis_years]
+
+model_dt <- merge(
+  heat_weekly,
+  mort_weekly[, .(location, death_week_start, deaths_next_week, n_death_days)],
+  by.x = c("location", "outcome_week_start"),
+  by.y = c("location", "death_week_start"),
+  all.x = TRUE
+)
+
+# Province ordering from earlier, if available
+if (exists("province_order")) {
+  model_dt[, province := factor(province, levels = province_order)]
+}
+
+# Sanity checks
+cat("Model data rows:", nrow(model_dt), "\n")
+cat("Date range of exposure weeks:\n")
+print(range(model_dt$exposure_week_start))
+cat("Date range of outcome weeks:\n")
+print(range(model_dt$outcome_week_start))
+
+print(
+  model_dt[
+    ,
+    .(
+      n_weeks = .N,
+      total_deaths_next_week = sum(deaths_next_week),
+      mean_weekly_deaths = round(mean(deaths_next_week), 2),
+      weeks_with_heat90 = sum(heat_days_90 > 0),
+      weeks_with_heat95 = sum(heat_days_95 > 0),
+      weeks_with_33C = sum(heat_days_33 > 0),
+      weeks_with_35C = sum(heat_days_35 > 0)
+    ),
+    by = province
+  ][order(province)]
+)
+
+
+# ------------------------------------------------------------------------------
+# 16b. Descriptive Table for Study Population and Mortality Data
+# ------------------------------------------------------------------------------
+
+# Make sure missing death counts are treated as zero
+mort_daily_full[is.na(deaths), deaths := 0]
+
+# 1. Province-level population from Eurostat grid
+# Uses intersected population pieces: population in each province = T * frac
+population_by_province <- as.data.table(as.data.frame(ix))[
+  ,
+  .(
+    population = round(sum(T * frac, na.rm = TRUE))
+  ),
+  by = COD_PROV
+]
+
+population_by_province <- merge(
+  population_by_province,
+  province_names,
+  by.x = "COD_PROV",
+  by.y = "location",
+  all.x = TRUE
+)
+
+population_by_province <- population_by_province[, .(
+  province,
+  population
+)]
+
+# 2. Total deaths and age structure from mortality data
+mort_desc_age <- mort_long[
+  year %in% 2011:2019 & month %in% c(6, 7, 8),
+  .(
+    total_deaths = sum(deaths, na.rm = TRUE),
+    deaths_65plus = sum(deaths[CL_ETA >= 14], na.rm = TRUE)
+  ),
+  by = location
+]
+
+mort_desc_age[, deaths_65plus_percent := round(deaths_65plus / total_deaths * 100, 1)]
+
+mort_desc_age <- merge(
+  mort_desc_age,
+  province_names,
+  by = "location",
+  all.x = TRUE
+)
+
+mort_desc_age <- mort_desc_age[, .(
+  province,
+  total_deaths,
+  deaths_65plus_percent
+)]
+
+# 3. Analytical sample size and weekly mortality from model dataset
+model_desc <- model_dt[
+  ,
+  .(
+    province_week_observations = .N,
+    mean_weekly_deaths = round(mean(deaths_next_week, na.rm = TRUE), 1),
+    min_weekly_deaths = min(deaths_next_week, na.rm = TRUE),
+    max_weekly_deaths = max(deaths_next_week, na.rm = TRUE)
+  ),
+  by = province
+]
+
+# 4. Mean daily deaths from daily mortality data
+daily_desc <- mort_daily_full[
+  month(date_day) %in% c(6, 7, 8),
+  .(
+    mean_daily_deaths = round(mean(deaths, na.rm = TRUE), 1)
+  ),
+  by = province
+]
+
+# 5. Combine table
+population_description <- Reduce(
+  function(x, y) merge(x, y, by = "province", all = TRUE),
+  list(
+    population_by_province,
+    model_desc,
+    daily_desc,
+    mort_desc_age
+  )
+)
+
+# Order provinces
+population_description[, province := factor(province, levels = province_order)]
+population_description <- population_description[order(province)]
+
+print(population_description)
+
+# ------------------------------------------------------------------------------
+# 17. Fit Poisson Models
+# ------------------------------------------------------------------------------
+exposure_vars <- c(
+  "P90 (weighted)" = "heat_days_90",
+  "P95 (weighted)" = "heat_days_95",
+  "Above 33C"      = "heat_days_33",
+  "Above 35C"      = "heat_days_35"
+)
+
+fit_model <- function(exposure_var, data) {
+  f <- as.formula(paste0(
+    "deaths_next_week ~ ", exposure_var,
+    " + factor(location) + factor(year)"
+  ))
+  glm(f, family = poisson(link = "log"), data = data)
+}
+
+models_weighted <- lapply(exposure_vars, fit_model, data = model_dt)
+
+# ------------------------------------------------------------------------------
+# 18. Unweighted Temperature: P95 Model, p90, above 35 model, and above 33 model
+# ------------------------------------------------------------------------------
+dte_u_daily[, is_summer := month(date_day) %in% c(6, 7, 8)]
+
+
+# Remove old historical threshold columns before merging
+old_hist_cols <- grep("^p90_hist|^p95_hist", names(dte_u_daily), value = TRUE)
+
+if (length(old_hist_cols) > 0) {
+  dte_u_daily[, (old_hist_cols) := NULL]
+}
+
+# Merge unweighted historical thresholds
+dte_u_daily <- merge(
+  dte_u_daily,
+  hist_thresholds_u,
+  by = "province",
+  all.x = TRUE
+)
+
+# Recompute week_start after merge (merge replaces the object, column is lost)
+dte_u_daily[, week_start := floor_date(date_day, unit = "week", week_start = 1)]
+
+# 90 percentile — using unweighted historical threshold
+dte_u_daily[, heat_90_u := is_summer & tas_max > p90_hist_u]
+
+heat_weekly_u_90 <- dte_u_daily[
+  is_summer == TRUE,
+  .(
+    heat_days_90_u = sum(heat_90_u),
+    n_summer_days  = .N
+  ),
+  by = .(location, province, week_start)
+]
+
+heat_weekly_u_90[, outcome_week_start := week_start + days(7)]
+heat_weekly_u_90[, year := year(week_start)]
+
+model_dt_u_90 <- merge(
+  heat_weekly_u_90,
+  mort_weekly[, .(location, death_week_start, deaths_next_week)],
+  by.x = c("location", "outcome_week_start"),
+  by.y = c("location", "death_week_start"),
+  all.x = TRUE
+)
+
+model_dt_u_90 <- model_dt_u_90[!is.na(deaths_next_week)]
+model_dt_u_90 <- model_dt_u_90[year %in% analysis_years]
+
+model_unweighted_p90 <- fit_model("heat_days_90_u", model_dt_u_90)
+
+
+# 95 percentile — use historical threshold
+dte_u_daily[, heat_95_u := is_summer & tas_max > p95_hist_u]
+
+dte_u_daily[, week_start := floor_date(date_day, unit = "week", week_start = 1)]
+
+heat_weekly_u_95 <- dte_u_daily[
+  is_summer == TRUE,
+  .(
+    heat_days_95_u = sum(heat_95_u),
+    n_summer_days  = .N
+  ),
+  by = .(location, province, week_start)
+]
+
+heat_weekly_u_95[, outcome_week_start := week_start + days(7)]
+heat_weekly_u_95[, year := year(week_start)]
+
+model_dt_u_95 <- merge(
+  heat_weekly_u_95,
+  mort_weekly[, .(location, death_week_start, deaths_next_week)],
+  by.x = c("location", "outcome_week_start"),
+  by.y = c("location", "death_week_start"),
+  all.x = TRUE
+)
+
+model_dt_u_95 <- model_dt_u_95[!is.na(deaths_next_week)]
+model_dt_u_95 <- model_dt_u_95[year %in% analysis_years]
+
+model_unweighted_p95 <- fit_model("heat_days_95_u", model_dt_u_95)
+
+
+
+# Unweighted Above 33C model
+dte_u_daily[, heat_33_u := is_summer & tas_max >= 33]
+
+heat_weekly_u_33 <- dte_u_daily[
+  is_summer == TRUE,
+  .(
+    heat_days_33_u = sum(heat_33_u),
+    n_summer_days  = .N
+  ),
+  by = .(location, province, week_start)
+]
+
+heat_weekly_u_33[, outcome_week_start := week_start + days(7)]
+heat_weekly_u_33[, year := year(week_start)]
+
+model_dt_u_33 <- merge(
+  heat_weekly_u_33,
+  mort_weekly[, .(location, death_week_start, deaths_next_week)],
+  by.x = c("location", "outcome_week_start"),
+  by.y = c("location", "death_week_start"),
+  all.x = TRUE
+)
+
+model_dt_u_33 <- model_dt_u_33[!is.na(deaths_next_week)]
+model_dt_u_33 <- model_dt_u_33[year %in% analysis_years]
+
+model_unweighted_33 <- fit_model("heat_days_33_u", model_dt_u_33)
+
+
+# Unweighted Above 35C model
+dte_u_daily[, heat_35_u := is_summer & tas_max >= 35]
+
+heat_weekly_u_35 <- dte_u_daily[
+  is_summer == TRUE,
+  .(
+    heat_days_35_u = sum(heat_35_u),
+    n_summer_days  = .N
+  ),
+  by = .(location, province, week_start)
+]
+
+heat_weekly_u_35[, outcome_week_start := week_start + days(7)]
+heat_weekly_u_35[, year := year(week_start)]
+
+model_dt_u_35 <- merge(
+  heat_weekly_u_35,
+  mort_weekly[, .(location, death_week_start, deaths_next_week)],
+  by.x = c("location", "outcome_week_start"),
+  by.y = c("location", "death_week_start"),
+  all.x = TRUE
+)
+
+model_dt_u_35 <- model_dt_u_35[!is.na(deaths_next_week)]
+model_dt_u_35 <- model_dt_u_35[year %in% analysis_years]
+
+model_unweighted_35 <- fit_model("heat_days_35_u", model_dt_u_35)
+
+
+# ------------------------------------------------------------------------------
+# 18b. Province-specific Poisson Models
+# ------------------------------------------------------------------------------
+
+fit_model_province <- function(exposure_var, data) {
+  f <- as.formula(paste0(
+    "deaths_next_week ~ ", exposure_var,
+    " + factor(year)"
+  ))
+  glm(f, family = poisson(link = "log"), data = data)
+}
+
+extract_irr_province <- function(data, exposure_var, label) {
+  
+  results <- data[
+    ,
+    {
+      if (length(unique(get(exposure_var))) < 2) {
+        .(
+          definition = label,
+          IRR = NA_real_,
+          CI_low = NA_real_,
+          CI_high = NA_real_,
+          pct_change = NA_real_,
+          p_value = NA_real_
+        )
+      } else {
+        model <- fit_model_province(exposure_var, .SD)
+        coefs <- summary(model)$coefficients
+        
+        beta  <- coef(model)[exposure_var]
+        se    <- coefs[exposure_var, "Std. Error"]
+        p_val <- coefs[exposure_var, ncol(coefs)]
+        
+        .(
+          definition = label,
+          IRR = round(exp(beta), 3),
+          CI_low = round(exp(beta - 1.96 * se), 3),
+          CI_high = round(exp(beta + 1.96 * se), 3),
+          pct_change = round((exp(beta) - 1) * 100, 1),
+          p_value = round(p_val, 4)
+        )
+      }
+    },
+    by = province
+  ]
+  
+  return(results)
+}
+
+results_by_province <- rbindlist(list(
+  extract_irr_province(model_dt, "heat_days_90", "P90 (weighted)"),
+  extract_irr_province(model_dt, "heat_days_95", "P95 (weighted)"),
+  extract_irr_province(model_dt, "heat_days_33", "Above 33C"),
+  extract_irr_province(model_dt, "heat_days_35", "Above 35C"),
+  extract_irr_province(model_dt_u_90, "heat_days_90_u", "P90 (unweighted)"),
+  extract_irr_province(model_dt_u_95, "heat_days_95_u", "P95 (unweighted)"),
+  extract_irr_province(model_dt_u_33, "heat_days_33_u", "Above 33C (unweighted)"),
+  extract_irr_province(model_dt_u_35, "heat_days_35_u", "Above 35C (unweighted)")
+))
+
+results_by_province <- results_by_province[order(province, definition)]
+
+print(results_by_province)
+
+# ------------------------------------------------------------------------------
+# Plot province-specific IRRs and confidence intervals
+# ------------------------------------------------------------------------------
+
+plot_province_irr <- copy(results_by_province)
+
+# Remove rows where the model could not be estimated
+plot_province_irr <- plot_province_irr[!is.na(IRR)]
+
+# Add weighted/unweighted group
+plot_province_irr[, model_group := fifelse(
+  grepl("unweighted", definition, ignore.case = TRUE),
+  "Unweighted",
+  "Weighted"
+)]
+
+# Clean definition labels
+plot_province_irr[, definition_clean := definition]
+
+plot_province_irr[, definition_clean := gsub(" \\(weighted\\)", "", definition_clean)]
+plot_province_irr[, definition_clean := gsub(" \\(unweighted\\)", "", definition_clean)]
+
+plot_province_irr[, definition_clean := factor(
+  definition_clean,
+  levels = c("P90", "P95", "Above 33C", "Above 35C")
+)]
+
+# Keep province order
+plot_province_irr[, province := factor(province, levels = province_order)]
+
+ggplot(plot_province_irr, aes(
+  x = IRR,
+  y = province,
+  colour = model_group,
+  shape = model_group
+)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(
+    aes(xmin = CI_low, xmax = CI_high),
+    height = 0.25,
+    position = position_dodge(width = 0.6),
+    linewidth = 0.7
+  ) +
+  geom_point(
+    position = position_dodge(width = 0.6),
+    size = 2.5
+  ) +
+  facet_wrap(~ definition_clean, scales = "free_x") +
+  scale_colour_manual(values = c("Weighted" = "steelblue", "Unweighted" = "tomato")) +
+  scale_shape_manual(values = c("Weighted" = 16, "Unweighted" = 17)) +
+  labs(
+    title = "Province-Specific Heat-Mortality Associations",
+    subtitle = "Incidence rate ratios per additional extreme-heat day in the preceding week",
+    x = "Incidence Rate Ratio (IRR)",
+    y = NULL,
+    colour = NULL,
+    shape = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 9, colour = "grey35"),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+# ------------------------------------------------------------------------------
+# Province-specific weighted vs unweighted IRRs
+# One panel per province
+# ------------------------------------------------------------------------------
+
+plot_wu_by_province <- copy(results_by_province)
+
+# Remove failed models
+plot_wu_by_province <- plot_wu_by_province[!is.na(IRR)]
+
+# Keep only definitions where weighted/unweighted comparison exists
+plot_wu_by_province <- plot_wu_by_province[
+  definition %in% c(
+    "P90 (weighted)",
+    "P90 (unweighted)",
+    "P95 (weighted)",
+    "P95 (unweighted)",
+    "Above 33C",
+    "Above 33C (unweighted)",
+    "Above 35C",
+    "Above 35C (unweighted)"
+  )
+]
+
+# Weighted/unweighted group
+plot_wu_by_province[, model_group := fifelse(
+  grepl("unweighted", definition, ignore.case = TRUE),
+  "Unweighted",
+  "Weighted"
+)]
+
+# Clean definition names
+plot_wu_by_province[, definition_clean := definition]
+plot_wu_by_province[, definition_clean := gsub(" \\(weighted\\)", "", definition_clean)]
+plot_wu_by_province[, definition_clean := gsub(" \\(unweighted\\)", "", definition_clean)]
+
+plot_wu_by_province[, definition_clean := factor(
+  definition_clean,
+  levels = c("Above 35C", "Above 33C", "P95", "P90")
+)]
+
+# Province order
+plot_wu_by_province[, province := factor(province, levels = province_order)]
+
+
+ggplot(plot_wu_by_province, aes(
+  x = IRR,
+  y = definition_clean,
+  colour = model_group,
+  shape = model_group
+)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(
+    aes(xmin = CI_low, xmax = CI_high),
+    height = 0.25,
+    position = position_dodge(width = 0.55),
+    linewidth = 0.7
+  ) +
+  geom_point(
+    position = position_dodge(width = 0.55),
+    size = 2.3
+  ) +
+  facet_wrap(~ province, scales = "free_x", ncol = 4) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(n = 3)
+  ) +
+  labs(
+    title = "Province-Specific Heat-Mortality Estimates",
+    subtitle = "By extreme heat definitions and temperature weighting",
+    x = "Incidence Rate Ratio (IRR)",
+    y = NULL,
+    colour = NULL,
+    shape = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 9, colour = "grey35"),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+# ------------------------------------------------------------------------------
+# 19. Extract IRRs and Confidence Intervals
+# ------------------------------------------------------------------------------
+
+extract_irr <- function(model, label, exposure_var) {
+  coefs <- summary(model)$coefficients
+  beta  <- coef(model)[exposure_var]
+  se    <- coefs[exposure_var, "Std. Error"]
+  p_val <- coefs[exposure_var, ncol(coefs)]
+  
+  data.table(
+    definition = label,
+    IRR        = round(exp(beta), 3),
+    CI_low     = round(exp(beta - 1.96 * se), 3),
+    CI_high    = round(exp(beta + 1.96 * se), 3),
+    pct_change = round((exp(beta) - 1) * 100, 1),
+    p_value    = round(p_val, 4)
+  )
+}
+
+# Weighted models
+results_weighted <- rbindlist(lapply(names(models_weighted), function(label) {
+  extract_irr(models_weighted[[label]], label, exposure_vars[[label]])
+}))
+
+result_unweighted_p90 <- extract_irr(model_unweighted_p90, "P90 (unweighted)", "heat_days_90_u")
+result_unweighted_p95 <- extract_irr(model_unweighted_p95, "P95 (unweighted)", "heat_days_95_u")
+
+
+
+result_unweighted_33 <- extract_irr(
+  model_unweighted_33, "Above 33C (unweighted)", "heat_days_33_u"
+)
+
+result_unweighted_35 <- extract_irr(
+  model_unweighted_35, "Above 35C (unweighted)", "heat_days_35_u"
+)
+
+all_results <- rbind(results_weighted,
+                     result_unweighted_p90,
+                     result_unweighted_p95,
+                     result_unweighted_33,
+                     result_unweighted_35)
+all_results
+
+# ------------------------------------------------------------------------------
+# Whole-region IRR table: weighted and unweighted models
+# ------------------------------------------------------------------------------
+
+extract_irr_region <- function(model, exposure_var, label, exposure_type) {
+  
+  coefs <- summary(model)$coefficients
+  
+  se    <- coefs[exposure_var, "Std. Error"]
+  p_val <- coefs[exposure_var, ncol(coefs)]
+  
+  data.table(
+    exposure_type = exposure_type,
+    definition = label,
+    IRR = round(exp(beta), 3),
+    CI_low = round(exp(beta - 1.96 * se), 3),
+    CI_high = round(exp(beta + 1.96 * se), 3),
+    pct_change = round((exp(beta) - 1) * 100, 1),
+    p_value = round(p_val, 4),
+  )
+}
+
+# Weighted regional models
+region_irr_weighted <- rbindlist(list(
+  extract_irr_region(models_weighted[["P90 (weighted)"]], "heat_days_90", "P90", "Weighted"),
+  extract_irr_region(models_weighted[["P95 (weighted)"]], "heat_days_95", "P95", "Weighted"),
+  extract_irr_region(models_weighted[["Above 33C"]], "heat_days_33", "Above 33°C", "Weighted"),
+  extract_irr_region(models_weighted[["Above 35C"]], "heat_days_35", "Above 35°C", "Weighted")
+))
+
+# Unweighted regional models
+region_irr_unweighted <- rbindlist(list(
+  extract_irr_region(model_unweighted_p90, "heat_days_90_u", "P90", "Unweighted"),
+  extract_irr_region(model_unweighted_p95, "heat_days_95_u", "P95", "Unweighted"),
+  extract_irr_region(model_unweighted_33,  "heat_days_33_u", "Above 33°C", "Unweighted"),
+  extract_irr_region(model_unweighted_35,  "heat_days_35_u", "Above 35°C", "Unweighted")
+))
+
+# Combined table
+region_irr_table <- rbindlist(list(
+  region_irr_weighted,
+  region_irr_unweighted
+))
+
+print(region_irr_table)
+# ------------------------------------------------------------------------------
+# 21. Plot IRRs
+# ------------------------------------------------------------------------------
+
+
+all_results[, definition := factor(definition, levels = c(
+  "P90 (weighted)", "P95 (weighted)", "Above 33C", "Above 35C",
+  "P90 (unweighted)", "P95 (unweighted)", "Above 33C (unweighted)", "Above 35C (unweighted)"
+))]
+
+all_results[, model_group := fifelse(
+  grepl("unweighted", definition, ignore.case = TRUE), "Unweighted", "Weighted"
+)]
+
+
+
+ggplot(all_results, aes(x = definition, y = IRR, colour = model_group, shape = model_group)) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymin = CI_low, ymax = CI_high), width = 0.15, linewidth = 0.8) +
+  scale_colour_manual(values = c("Weighted" = "steelblue", "Unweighted" = "tomato")) +
+  scale_shape_manual(values  = c("Weighted" = 16, "Unweighted" = 17)) +
+  labs(
+    title    = "Heat–Mortality Associations by Exposure Definition",
+    subtitle = "Incidence rate ratios per additional extreme-heat day in the preceding week",
+    x        = NULL,
+    y        = "Incidence Rate Ratio (IRR)",
+    colour   = NULL,
+    shape    = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      size = 14
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size = 10,
+      colour = "grey35",
+      lineheight = 1.1
+    ),
+    axis.text.x = element_text(
+      angle = 20,
+      hjust = 1
+    ),
+    legend.position = "top",
+    legend.justification = "center",
+    panel.grid.minor = element_blank()
+  )
